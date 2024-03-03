@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Plantilla para la creación de una instancia RDS en una subred privada y una instancia EC2 en una subred pública
+Parameters:
+  AmiID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Description: ID de la AMI
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-arm64-gp2'
+  CIDRVPC:
+    Type: String
+    Description: Bloque CIDR de la VPC
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    Default: 10.0.0.0/16
+    ConstraintDescription: Debe ser una red IP válida de la forma x.x.x.x
+  Usuario:
+    Type: String
+    Description: Nombre de usuario de la instancia RDS
+    Default: admin
+  Password:
+    Type: String
+    Description: Contrasena de la instancia RDS
+    NoEcho: true
+    MinLength: 8
+Resources:
+  miVPC:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Parameters:
+        Nombre: practica-rds
+        VPC: !Ref CIDRVPC 
+        AZ: 2
+        SubredesPublicas: SI
+        SubredesPrivadas: SI
+        NATGateways: 'NO'
+        Bastion: 'NO'
+        LearnerLab: "SI"
+      TemplateURL: ./vpc.yaml
+  GrupoSeguridadEC2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Grupo de seguridad para la instancia EC2
+      VpcId: !GetAtt miVPC.Outputs.VPC
+  GrupoSeguridadRDS:
+    Type: AWS::RDS::DBSecurityGroup
+    Properties:
+      GroupDescription: Grupo de seguridad para la instancia RDS
+      DBSecurityGroupIngress:
+        - EC2SecurityGroupId: !Ref GrupoSeguridadEC2
+      EC2VpcId: !GetAtt miVPC.Outputs.VPC
+  InstanciaEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiID
+      InstanceType: t4g.micro
+      SubnetId: !GetAtt miVPC.Outputs.Publica1
+      IamInstanceProfile: LabInstanceProfile
+      SecurityGroupIds: [!Ref GrupoSeguridadEC2]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+          yum update -y
+          yum install -y mysql 
+      Tags:
+        - Key: Name
+          Value: Cliente-BD
+  GrupoSubredesRDS:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+         DBSubnetGroupDescription: Grupo de subredes para la instancia RDS destino donde se replicara la BD origen
+         SubnetIds:
+            - !GetAtt miVPC.Outputs.Privada1
+            - !GetAtt miVPC.Outputs.Privada2
+  InstanciaRDS:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      AllocatedStorage: 20
+      StorageType: gp3
+      DBInstanceClass: db.t3.small
+      Engine: mysql
+      MasterUsername: !Ref Usuario
+      MasterUserPassword: !Ref Password
+      BackupRetentionPeriod: 0
+      DBSecurityGroups:
+        - !Ref GrupoSeguridadRDS
+      DBSubnetGroupName: !Ref GrupoSubredesRDS
+
+Outputs:
+  InstanciaEC2:
+    Description: Instancia EC2 con cliente MySQL
+    Value: !Ref InstanciaEC2
+  PuntoEnlaceInstanciaRDS:
+    Description: Punto de enlace a la Instancia RDS en subred privada
+    Value: !GetAtt InstanciaRDS.Endpoint.Address
